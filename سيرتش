@@ -1,0 +1,1224 @@
+part of '../customer_screen.dart';
+
+class CustomerSearchPage extends StatefulWidget {
+  final bool canSave;
+  const CustomerSearchPage({super.key, this.canSave = true});
+  @override
+  State<CustomerSearchPage> createState() => _CustomerSearchPageState();
+}
+
+class _CustomerSearchPageState extends State<CustomerSearchPage> {
+  final ProductDiscoveryController controller = ProductDiscoveryController();
+  final TextEditingController _searchController = TextEditingController();
+  final SpecialistSearchService _specialistSearchService =
+      SpecialistSearchService();
+  Timer? _specialistDebounce;
+  int _specialistRequestId = 0;
+  bool _searchSpecialists = false;
+  bool _isLoadingSpecialists = false;
+  bool _hasSearchedSpecialists = false;
+  String? _specialistError;
+  List<SpecialistSearchResult> _specialists = [];
+  String searchText = '';
+  String? selectedCategory;
+  List<String> selectedStyles = [];
+  List<String> selectedColors = [];
+  List<String> selectedMaterials = [];
+  double? minimumPrice;
+  double? maximumPrice;
+  ProductSortOption sortOption = ProductSortOption.newest;
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+        child: Column(
+          children: [
+            TextField(
+              controller: _searchController,
+              autocorrect: false,
+              enableSuggestions: !_searchSpecialists,
+              textInputAction: TextInputAction.search,
+              onChanged: _onSearchChanged,
+              onSubmitted: (_) {
+                if (_searchSpecialists) _searchSpecialist();
+              },
+              decoration: InputDecoration(
+                hintText: _searchSpecialists
+                    ? 'Search by username...'
+                    : selectedCategory == null
+                    ? 'Search products by keyword...'
+                    : 'Search products...',
+                prefixIcon: const Icon(Icons.search, color: Color(0xFF817A76)),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 18,
+                  vertical: 18,
+                ),
+                suffixIcon: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (searchText.isNotEmpty)
+                      IconButton(
+                        tooltip: 'Clear search',
+                        icon: const Icon(Icons.close),
+                        onPressed: () {
+                          _searchController.clear();
+                          _onSearchChanged('');
+                        },
+                      ),
+                    if (!_searchSpecialists)
+                      IconButton(
+                        tooltip: 'Search furniture by image',
+                        icon: const Icon(
+                          Icons.camera_alt_outlined,
+                          color: Color(0xFF76232A),
+                        ),
+                        onPressed: _openFurnitureImageSearch,
+                      ),
+                  ],
+                ),
+                filled: true,
+                fillColor: Colors.white,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            if (selectedCategory == null || _searchSpecialists) ...[
+              Row(
+                children: [
+                  Expanded(child: _buildSearchMode('Products', false)),
+                  Expanded(child: _buildSearchMode('Specialists', true)),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
+            if (_searchSpecialists)
+              Expanded(child: _buildSpecialists())
+            else if (selectedCategory == null && searchText.trim().isEmpty)
+              Expanded(child: _buildCategories())
+            else
+              Expanded(child: _buildProducts()),
+          ],
+        ),
+      ),
+    );
+  }
+
+  bool _openingImageSearch = false;
+
+  Future<void> _openFurnitureImageSearch() async {
+    if (_openingImageSearch || _searchSpecialists) return;
+
+    _openingImageSearch = true;
+    FocusScope.of(context).unfocus();
+
+    try {
+      final bytes = await FurnitureImageSearchPage.selectPhoto();
+
+      if (bytes == null || !mounted || _searchSpecialists) return;
+
+      await Navigator.push<void>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => FurnitureImageSearchPage(
+            initialImageBytes: bytes,
+            canSave: widget.canSave,
+            onProductSelected: (detailsContext, product) {
+              Navigator.push(
+                detailsContext,
+                MaterialPageRoute(
+                  builder: (_) => ImageDetailsPage(
+                    portfolioId: product.id!,
+                    canSave: widget.canSave,
+                    data: product.toMap(),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      );
+    } on StateError catch (error) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error.message.toString())));
+    } catch (_) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Unable to open this photo. Please choose another image.',
+          ),
+        ),
+      );
+    } finally {
+      _openingImageSearch = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _specialistDebounce?.cancel();
+    _specialistRequestId++;
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Widget _buildSearchMode(String label, bool specialists) {
+    final selected = _searchSpecialists == specialists;
+    return Semantics(
+      selected: selected,
+      button: true,
+      child: InkWell(
+        onTap: () => _setSearchMode(specialists),
+        child: Container(
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(
+                color: selected
+                    ? const Color(0xFF76232A)
+                    : const Color(0xFFE2DCD7),
+                width: selected ? 3 : 1,
+              ),
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+              color: selected
+                  ? const Color(0xFF76232A)
+                  : const Color(0xFF817A76),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _setSearchMode(bool specialists) {
+    if (_searchSpecialists == specialists) return;
+    _specialistDebounce?.cancel();
+    _specialistRequestId++;
+    _searchController.clear();
+    setState(() {
+      _searchSpecialists = specialists;
+      searchText = '';
+      _specialists = [];
+      _specialistError = null;
+      _isLoadingSpecialists = false;
+      _hasSearchedSpecialists = false;
+    });
+    if (specialists) {
+      _searchSpecialist();
+    }
+  }
+
+  void _onSearchChanged(String value) {
+    _specialistDebounce?.cancel();
+    // Invalidate immediately, before waiting for the next debounce.
+    _specialistRequestId++;
+    setState(() {
+      searchText = value;
+      _specialists = [];
+      _specialistError = null;
+      _isLoadingSpecialists = false;
+      _hasSearchedSpecialists = false;
+    });
+    if (_searchSpecialists) {
+      _specialistDebounce = Timer(
+        const Duration(milliseconds: 350),
+        _searchSpecialist,
+      );
+    }
+  }
+
+  Future<void> _searchSpecialist() async {
+    _specialistDebounce?.cancel();
+    if (!mounted || !_searchSpecialists || _isLoadingSpecialists) return;
+    final requestId = ++_specialistRequestId;
+    final username = SpecialistSearchService.normalizeUsername(searchText);
+    if (username.isEmpty && searchText.trim().isNotEmpty) {
+      setState(() {
+        _specialistError = searchText.trim().isEmpty
+            ? null
+            : 'Please enter a username after @.';
+        _specialists = [];
+        _isLoadingSpecialists = false;
+        _hasSearchedSpecialists = false;
+      });
+      return;
+    }
+    final validationError = SpecialistSearchService.validateUsername(username);
+    if (validationError != null) {
+      setState(() {
+        _specialistError = validationError;
+        _specialists = [];
+        _isLoadingSpecialists = false;
+        _hasSearchedSpecialists = false;
+      });
+      return;
+    }
+    setState(() {
+      _isLoadingSpecialists = true;
+      _specialistError = null;
+      _specialists = [];
+      _hasSearchedSpecialists = false;
+    });
+    try {
+      final results = await _specialistSearchService.search(username);
+      if (!mounted || requestId != _specialistRequestId) return;
+      setState(() {
+        _specialists = results;
+        _hasSearchedSpecialists = true;
+        _isLoadingSpecialists = false;
+      });
+    } catch (error) {
+      if (!mounted || requestId != _specialistRequestId) return;
+      setState(() {
+        _isLoadingSpecialists = false;
+        _specialistError =
+            error is FirebaseException && error.code == 'permission-denied'
+            ? 'You do not have permission to search Specialists.'
+            : 'Unable to search Specialists. Check your connection and try again.';
+      });
+    }
+  }
+
+  Widget _buildSpecialists() {
+    if (_isLoadingSpecialists) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_specialistError != null) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(_specialistError!, textAlign: TextAlign.center),
+            const SizedBox(height: 12),
+            TextButton(
+              onPressed: _searchSpecialist,
+              child: const Text('Try again'),
+            ),
+          ],
+        ),
+      );
+    }
+    if (!_hasSearchedSpecialists) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_specialists.isEmpty) {
+      return const Center(
+        child: Text(
+          'No Specialist found.',
+          style: TextStyle(color: Color(0xFF817A76)),
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '${_specialists.length} ${_specialists.length == 1 ? 'specialist' : 'specialists'}',
+          style: const TextStyle(fontSize: 15, color: Color(0xFF817A76)),
+        ),
+        const SizedBox(height: 14),
+        Expanded(
+          child: ListView.separated(
+            itemCount: _specialists.length,
+            separatorBuilder: (_, _) => const SizedBox(height: 14),
+            itemBuilder: (context, index) {
+              final specialist = _specialists[index];
+              return Material(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            SpecialistProfileScreen(ownerId: specialist.uid),
+                      ),
+                    );
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 15,
+                    ),
+                    child: Row(
+                      children: [
+                        ClipOval(
+                          child: specialist.profileImageUrl.isEmpty
+                              ? _specialistAvatarFallback(specialist)
+                              : Image.network(
+                                  specialist.profileImageUrl,
+                                  width: 56,
+                                  height: 56,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, _, _) =>
+                                      _specialistAvatarFallback(specialist),
+                                ),
+                        ),
+                        const SizedBox(width: 15),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                specialist.name.isEmpty
+                                    ? specialist.username
+                                    : specialist.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 17,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF292624),
+                                ),
+                              ),
+                              const SizedBox(height: 3),
+                              _buildSpecialistUsername(specialist.username),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        const Icon(
+                          Icons.chevron_right,
+                          color: Color(0xFF76232A),
+                          size: 28,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSpecialistUsername(String username) {
+    final query = SpecialistSearchService.normalizeUsername(searchText);
+    final highlight = query.isNotEmpty && username.startsWith(query);
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(
+            text: highlight ? '@$query' : '@$username',
+            style: highlight
+                ? const TextStyle(backgroundColor: Color(0xFFEADDE0))
+                : null,
+          ),
+          if (highlight) TextSpan(text: username.substring(query.length)),
+        ],
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(fontSize: 15, color: Color(0xFF76232A)),
+    );
+  }
+
+  Widget _specialistAvatarFallback(SpecialistSearchResult specialist) {
+    final label = specialist.name.isEmpty
+        ? specialist.username
+        : specialist.name;
+    return Container(
+      width: 56,
+      height: 56,
+      alignment: Alignment.center,
+      color: const Color(0xFFEAE4DF),
+      child: Text(
+        label.isEmpty ? '?' : label.substring(0, 1).toUpperCase(),
+        style: const TextStyle(
+          fontSize: 23,
+          fontWeight: FontWeight.bold,
+          fontFamily: 'serif',
+          color: Color(0xFF76232A),
+        ),
+      ),
+    );
+  }
+
+  // ================= CATEGORIES =================
+  Widget _buildCategories() {
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: controller.getCategories(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return const Center(child: Text('Unable to load categories.'));
+        }
+        final firestoreCategories = snapshot.data ?? [];
+        final Map<String, String> categoryImages = {};
+        for (final category in firestoreCategories) {
+          final name = category['name']?.toString() ?? '';
+          final imageUrl = category['categoryImageUrl']?.toString() ?? '';
+          if (name.isNotEmpty) {
+            categoryImages[name] = imageUrl;
+          }
+        }
+        // Show every category. Product keyword searches are handled by
+        // _buildProducts, not by filtering category names.
+        final categories = ProductDiscoveryController.furnitureTypes;
+        if (categories.isEmpty) {
+          return const Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.search_off,
+                  size: 50,
+                  color: const Color(0xFF817A76),
+                ),
+                SizedBox(height: 12),
+                Text(
+                  'No categories found.',
+                  style: TextStyle(color: Color(0xFF817A76), fontSize: 16),
+                ),
+              ],
+            ),
+          );
+        }
+        return GridView.builder(
+          itemCount: categories.length,
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            crossAxisSpacing: 10,
+            mainAxisSpacing: 18,
+            childAspectRatio: 0.76,
+          ),
+          itemBuilder: (context, index) {
+            final categoryName = categories[index];
+            final categoryImageUrl = categoryImages[categoryName] ?? '';
+            return GestureDetector(
+              onTap: () {
+                setState(() {
+                  selectedCategory = categoryName;
+                  searchText = '';
+                  _searchController.clear();
+                });
+              },
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(17),
+                      child: categoryImageUrl.isNotEmpty
+                          ? Image.network(
+                              categoryImageUrl,
+                              width: double.infinity,
+                              fit: BoxFit.cover,
+                              errorBuilder: (context, error, stackTrace) =>
+                                  _buildEmptyCategoryImage(),
+                            )
+                          : _buildEmptyCategoryImage(),
+                    ),
+                  ),
+                  const SizedBox(height: 7),
+                  Text(
+                    categoryName,
+                    maxLines: 2,
+                    textAlign: TextAlign.center,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      height: 1.2,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF292624),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildEmptyCategoryImage() {
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      color: const Color(0xFFEAE4DF),
+      child: const Center(
+        child: Icon(Icons.chair_outlined, size: 42, color: Color(0xFF817A76)),
+      ),
+    );
+  }
+
+  // ================= PRODUCTS =================
+  Widget _buildProducts() {
+    return Column(
+      children: [
+        Row(
+          children: [
+            IconButton(
+              onPressed: () {
+                setState(() {
+                  selectedCategory = null;
+                  searchText = '';
+                  _searchController.clear();
+                  selectedStyles = [];
+                  selectedColors = [];
+                  selectedMaterials = [];
+                  minimumPrice = null;
+                  maximumPrice = null;
+                  sortOption = ProductSortOption.newest;
+                });
+              },
+              icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 19),
+            ),
+            Expanded(
+              child: Text(
+                selectedCategory ?? 'Search results',
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF292624),
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Filter',
+              onPressed: _showFilterBottomSheet,
+              icon: const Icon(Icons.tune),
+            ),
+            IconButton(
+              tooltip: 'Sort',
+              onPressed: _showSortBottomSheet,
+              icon: const Icon(Icons.sort),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Expanded(
+          child: StreamBuilder<List<PortfolioImageModel>>(
+            stream: controller.getAllItems(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (snapshot.hasError) {
+                return const Center(child: Text('Unable to load products.'));
+              }
+              final allItems = (snapshot.data ?? [])
+                  .where((item) => item.imageUrl.isNotEmpty)
+                  .toList();
+              // Only For Sale products from the selected category.
+              var results = controller.filterAndSortItems(
+                items: allItems,
+                selectedType: PortfolioImageType.forSale,
+                selectedFurnitureType: selectedCategory,
+                selectedStyles: selectedStyles,
+                selectedColors: selectedColors,
+                selectedMaterials: selectedMaterials,
+                minimumPrice: minimumPrice,
+                maximumPrice: maximumPrice,
+                sortOption: sortOption,
+              );
+              // Text search inside selected category.
+              results = controller.searchItems(results, searchText);
+              if (results.isEmpty) {
+                return const Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.inventory_2_outlined,
+                        size: 50,
+                        color: const Color(0xFF817A76),
+                      ),
+                      SizedBox(height: 12),
+                      Text(
+                        'No products found.',
+                        style: TextStyle(
+                          color: Color(0xFF817A76),
+                          fontSize: 16,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }
+              return GridView.builder(
+                itemCount: results.length,
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 10,
+                  childAspectRatio: 0.69,
+                ),
+                itemBuilder: (context, index) {
+                  final item = results[index];
+                  return GestureDetector(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => ImageDetailsPage(
+                            portfolioId: item.id!,
+                            canSave: widget.canSave,
+                            data: {
+                              'imageUrl': item.imageUrl,
+                              'imageUrls': item.imageUrls,
+                              'title': item.title,
+                              'description': item.description,
+                              'styles': item.styles,
+                              'colors': item.colors,
+                              'materials': item.materials,
+                              'furnitureType': item.furnitureType,
+                              'dimensions': item.dimensions,
+                              'price': item.price,
+                              'type': item.type.name,
+                              'ownerId': item.ownerId,
+                            },
+                          ),
+                        ),
+                      );
+                    },
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(15),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: SizedBox(
+                              width: double.infinity,
+                              child: Image.network(
+                                item.imageUrl,
+                                fit: BoxFit.cover,
+                                errorBuilder: (context, error, stackTrace) =>
+                                    Container(
+                                      color: const Color(0xFFEAE4DF),
+                                      child: const Center(
+                                        child: Icon(
+                                          Icons.broken_image_outlined,
+                                          color: Color(0xFF817A76),
+                                        ),
+                                      ),
+                                    ),
+                              ),
+                            ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(10, 9, 10, 2),
+                            child: Text(
+                              (item.title?.trim().isNotEmpty ?? false)
+                                  ? item.title!
+                                  : (item.furnitureType ?? 'Product'),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Color(0xFF292624),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(10, 2, 10, 10),
+                            child: Text(
+                              item.price == null
+                                  ? 'Price unavailable'
+                                  : '${item.price!.toStringAsFixed(2)} SAR ',
+
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Color(0xFF76232A),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ================= FILTER =================
+  Future<void> _showFilterBottomSheet() async {
+    List<String> tempStyles = List.from(selectedStyles);
+    List<String> tempColors = List.from(selectedColors);
+    List<String> tempMaterials = List.from(selectedMaterials);
+    String tempMinPrice = minimumPrice?.toString() ?? '';
+    String tempMaxPrice = maximumPrice?.toString() ?? '';
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFFF8F5F1),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return SafeArea(
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: 20,
+                  right: 20,
+                  top: 12,
+                  bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // ================= HEADER =================
+                      SizedBox(
+                        height: 56,
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            // Back
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: IconButton(
+                                onPressed: () {
+                                  Navigator.pop(context);
+                                },
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(
+                                  minWidth: 44,
+                                  minHeight: 44,
+                                ),
+                                icon: const Icon(
+                                  Icons.arrow_back_ios_new_rounded,
+                                  size: 20,
+                                  color: Color(0xFF292624),
+                                ),
+                                tooltip: 'Back',
+                              ),
+                            ),
+                            // Filter title
+                            const Text(
+                              'Filter',
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF292624),
+                              ),
+                            ),
+                            // Clear
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: TextButton(
+                                onPressed: () {
+                                  // Clear the applied filters
+                                  setState(() {
+                                    selectedStyles = [];
+                                    selectedColors = [];
+                                    selectedMaterials = [];
+                                    minimumPrice = null;
+                                    maximumPrice = null;
+                                  });
+                                  Navigator.pop(context);
+                                },
+                                style: TextButton.styleFrom(
+                                  foregroundColor: const Color(0xFF76232A),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 8,
+                                  ),
+                                ),
+                                child: const Text(
+                                  'Clear',
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF76232A),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      // ================= STYLES =================
+                      _buildFilterTitle('Styles'),
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: ProductDiscoveryController.styles.map((
+                          style,
+                        ) {
+                          final isSelected = tempStyles.contains(style);
+                          return FilterChip(
+                            label: Text(style),
+                            selected: isSelected,
+                            onSelected: (selected) {
+                              setModalState(() {
+                                if (selected) {
+                                  tempStyles.add(style);
+                                } else {
+                                  tempStyles.remove(style);
+                                }
+                              });
+                            },
+                            selectedColor: const Color(0xFFEADDE0),
+                            backgroundColor: const Color(0xFFF8F5F1),
+                            checkmarkColor: const Color(0xFF76232A),
+                            side: BorderSide(
+                              color: isSelected
+                                  ? const Color(0xFF76232A)
+                                  : const Color(0xFFE2DCD7),
+                            ),
+                            labelStyle: TextStyle(
+                              color: isSelected
+                                  ? const Color(0xFF76232A)
+                                  : const Color(0xFF292624),
+                              fontWeight: isSelected
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 24),
+                      // ================= COLORS =================
+                      _buildFilterTitle('Colors'),
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: ProductDiscoveryController.colors.map((
+                          color,
+                        ) {
+                          final isSelected = tempColors.contains(color);
+                          return FilterChip(
+                            label: Text(color),
+                            selected: isSelected,
+                            onSelected: (selected) {
+                              setModalState(() {
+                                if (selected) {
+                                  tempColors.add(color);
+                                } else {
+                                  tempColors.remove(color);
+                                }
+                              });
+                            },
+                            selectedColor: const Color(0xFFEADDE0),
+                            backgroundColor: const Color(0xFFF8F5F1),
+                            checkmarkColor: const Color(0xFF76232A),
+                            side: BorderSide(
+                              color: isSelected
+                                  ? const Color(0xFF76232A)
+                                  : const Color(0xFFE2DCD7),
+                            ),
+                            labelStyle: TextStyle(
+                              color: isSelected
+                                  ? const Color(0xFF76232A)
+                                  : const Color(0xFF292624),
+                              fontWeight: isSelected
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 24),
+                      // ================= MATERIALS =================
+                      _buildFilterTitle('Materials'),
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: ProductDiscoveryController.materials.map((
+                          material,
+                        ) {
+                          final isSelected = tempMaterials.contains(material);
+                          return FilterChip(
+                            label: Text(material),
+                            selected: isSelected,
+                            onSelected: (selected) {
+                              setModalState(() {
+                                if (selected) {
+                                  tempMaterials.add(material);
+                                } else {
+                                  tempMaterials.remove(material);
+                                }
+                              });
+                            },
+                            selectedColor: const Color(0xFFEADDE0),
+                            backgroundColor: const Color(0xFFF8F5F1),
+                            checkmarkColor: const Color(0xFF76232A),
+                            side: BorderSide(
+                              color: isSelected
+                                  ? const Color(0xFF76232A)
+                                  : const Color(0xFFE2DCD7),
+                            ),
+                            labelStyle: TextStyle(
+                              color: isSelected
+                                  ? const Color(0xFF76232A)
+                                  : const Color(0xFF292624),
+                              fontWeight: isSelected
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 24),
+                      // ================= PRICE =================
+                      _buildFilterTitle('Price Range'),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextFormField(
+                              initialValue: tempMinPrice,
+                              keyboardType:
+                                  const TextInputType.numberWithOptions(
+                                    decimal: true,
+                                  ),
+                              onChanged: (value) {
+                                tempMinPrice = value;
+                              },
+                              decoration: InputDecoration(
+                                labelText: 'Min',
+                                suffixText: 'SAR',
+                                filled: true,
+                                fillColor: Colors.white,
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: const BorderSide(
+                                    color: Color(0xFFE2DCD7),
+                                  ),
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: const BorderSide(
+                                    color: Color(0xFF76232A),
+                                    width: 1.5,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: TextFormField(
+                              initialValue: tempMaxPrice,
+                              keyboardType:
+                                  const TextInputType.numberWithOptions(
+                                    decimal: true,
+                                  ),
+                              onChanged: (value) {
+                                tempMaxPrice = value;
+                              },
+                              decoration: InputDecoration(
+                                labelText: 'Max',
+                                suffixText: 'SAR',
+                                filled: true,
+                                fillColor: Colors.white,
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: const BorderSide(
+                                    color: Color(0xFFE2DCD7),
+                                  ),
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: const BorderSide(
+                                    color: Color(0xFF76232A),
+                                    width: 1.5,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 28),
+                      // ================= APPLY =================
+                      SizedBox(
+                        width: double.infinity,
+                        height: 52,
+                        child: ElevatedButton(
+                          onPressed: () {
+                            final minText = tempMinPrice.trim();
+                            final maxText = tempMaxPrice.trim();
+                            final min = minText.isEmpty
+                                ? null
+                                : double.tryParse(minText);
+                            final max = maxText.isEmpty
+                                ? null
+                                : double.tryParse(maxText);
+                            if (minText.isNotEmpty && min == null) {
+                              _showPriceError('Enter a valid minimum price.');
+                              return;
+                            }
+                            if (maxText.isNotEmpty && max == null) {
+                              _showPriceError('Enter a valid maximum price.');
+                              return;
+                            }
+                            if (min != null && min < 0) {
+                              _showPriceError(
+                                'Minimum price cannot be negative.',
+                              );
+                              return;
+                            }
+                            if (max != null && max < 0) {
+                              _showPriceError(
+                                'Maximum price cannot be negative.',
+                              );
+                              return;
+                            }
+                            if (min != null && max != null && min > max) {
+                              _showPriceError(
+                                'Minimum price cannot be greater than maximum price.',
+                              );
+                              return;
+                            }
+                            setState(() {
+                              selectedStyles = tempStyles;
+                              selectedColors = tempColors;
+                              selectedMaterials = tempMaterials;
+                              minimumPrice = min;
+                              maximumPrice = max;
+                            });
+                            Navigator.pop(context);
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF76232A),
+                            foregroundColor: Colors.white,
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(15),
+                            ),
+                          ),
+                          child: const Text(
+                            'Apply Filter',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildFilterTitle(String title) {
+    return Text(
+      title,
+      style: const TextStyle(
+        fontSize: 17,
+        fontWeight: FontWeight.w600,
+        color: Color(0xFF292624),
+      ),
+    );
+  }
+
+  void _showPriceError(String message) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  // ================= SORT =================
+  Future<void> _showSortBottomSheet() async {
+    final selected = await showModalBottomSheet<ProductSortOption>(
+      context: context,
+      backgroundColor: const Color(0xFFF8F5F1),
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(20),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Sort By',
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
+              RadioListTile<ProductSortOption>(
+                title: const Text('Newest'),
+                value: ProductSortOption.newest,
+                groupValue: sortOption,
+                onChanged: (value) {
+                  Navigator.pop(context, value);
+                },
+              ),
+              RadioListTile<ProductSortOption>(
+                title: const Text('Oldest'),
+                value: ProductSortOption.oldest,
+                groupValue: sortOption,
+                onChanged: (value) {
+                  Navigator.pop(context, value);
+                },
+              ),
+              RadioListTile<ProductSortOption>(
+                title: const Text('Price: Low to High'),
+                value: ProductSortOption.priceLowToHigh,
+                groupValue: sortOption,
+                onChanged: (value) {
+                  Navigator.pop(context, value);
+                },
+              ),
+              RadioListTile<ProductSortOption>(
+                title: const Text('Price: High to Low'),
+                value: ProductSortOption.priceHighToLow,
+                groupValue: sortOption,
+                onChanged: (value) {
+                  Navigator.pop(context, value);
+                },
+              ),
+              const SizedBox(height: 10),
+            ],
+          ),
+        );
+      },
+    );
+    if (selected != null) {
+      setState(() {
+        sortOption = selected;
+      });
+    }
+  }
+}
+// ================= IMAGE DETAILS =================
